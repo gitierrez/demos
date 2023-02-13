@@ -1,6 +1,10 @@
 # knowledge distillation
 # quantization
 # graph optimization
+import gc
+import json
+import warnings
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,7 +23,7 @@ from optimum.onnxruntime import ORTQuantizer, ORTModelForSequenceClassification
 from optimum.onnxruntime.configuration import AutoQuantizationConfig
 
 
-DEBUG = True
+DEBUG = False
 
 
 class PerformanceBenchmark:
@@ -49,8 +53,6 @@ class PerformanceBenchmark:
             label_id = sample['intent']
             preds.append(predicted_id)
             labels.append(label_id)
-            if i >= 20:
-                break
         metric = self.metric.compute(predictions=preds, references=labels)
         return metric
 
@@ -65,7 +67,12 @@ class PerformanceBenchmark:
             state_dict = self.pipeline.model.state_dict()
             torch.save(state_dict, tmp_path)
             size_in_mb = tmp_path.stat().st_size / (1024 * 1024)
-        tmp_path.unlink()
+        try:
+            tmp_path.unlink()
+        except PermissionError:
+            warnings.warn(
+                f'Captured PermissionError when attempting to remove {tmp_path}'
+            )
         return size_in_mb
 
     def compute_latency(self, query: str = 'auto', num_runs: int = 100):
@@ -121,7 +128,9 @@ class KLDistillationTrainer(transformers.Trainer):
 base_ckpt = 'transformersbook/bert-base-uncased-finetuned-clinc'
 student_ckpt = 'distilbert-base-uncased'
 
-pipe = transformers.pipeline('text-classification', model=base_ckpt)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+pipe = transformers.pipeline('text-classification', model=base_ckpt, device=device)
 clinc = datasets.load_dataset('clinc_oos', 'plus')
 
 intents_from_base = clinc['test'].features['intent']
@@ -156,11 +165,12 @@ save_student_to = 'distilbert-base-uncased-finetuned-clinc'
 student_training_args = KLDistillationTrainingArguments(
     output_dir=save_student_to,
     evaluation_strategy='epoch',
-    num_train_epochs=5,
+    num_train_epochs=10,
     learning_rate=2e-5,
-    per_device_train_batch_size=48,
-    per_device_eval_batch_size=48,
-    alpha=1.0,
+    per_device_train_batch_size=32,
+    per_device_eval_batch_size=32,
+    alpha=0.125,
+    temperature=7,
     weight_decay=0.01,
 )
 
@@ -176,10 +186,6 @@ student_config = transformers.AutoConfig.from_pretrained(
 )
 
 # distillation training
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-
 def student_model_init():
     return transformers.AutoModelForSequenceClassification.from_pretrained(
         student_ckpt,
@@ -196,9 +202,13 @@ trainer = KLDistillationTrainer(
     compute_metrics=compute_metrics,
     tokenizer=student_tokenizer,
 )
+trainer.train()
+trainer.save_model(save_student_to)
 
 
-def hp_space(trial):
+# this raises OOM
+"""def hp_space(trial):
+    gc.collect()
     return {
         'num_train_epochs': trial.suggest_int('num_train_epochs', 5, 10),
         'alpha': trial.suggest_float('alpha', 0, 1),
@@ -229,7 +239,7 @@ optim_trainer = KLDistillationTrainer(
 )
 
 optim_trainer.train()
-optim_trainer.save_model(save_student_to)
+optim_trainer.save_model(save_student_to)"""
 
 
 pipe = transformers.pipeline('text-classification', model=base_ckpt)
@@ -255,6 +265,8 @@ quantizer.quantize(save_dir='onnx-dq', quantization_config=dqconfig)
 
 dq_pipe = pipeline('text-classification', model='onnx-dq', accelerator='ort')
 benchmark['distilbert+onnx+quant'] = PerformanceBenchmark(pipeline=dq_pipe, dataset=clinc['test']).compute_statistics()
+
+json.dump(benchmark, open('export.json', 'w'))
 
 
 def plot_benchmark(benchmark: dict):
