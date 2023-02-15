@@ -16,17 +16,39 @@ def distill_model(
     n_trials: int = None,
     **training_kwargs
 ):
+    # rename columns
     if text_column != 'text':
         dataset = dataset.rename_column(text_column, 'text')
     if label_column != 'labels':
         dataset = dataset.rename_column(label_column, 'labels')
+
+    # check dataset only has 'train', 'validation', and 'test' splits
+    if set(dataset.column_names) != {'train', 'validation', 'test'}:
+        raise ValueError(
+            'Dataset must only have `train`, `validation` and `test` columns. '
+            f'Found {dataset.column_names} instead.'
+        )
+
+    # check dataset has 'text' and 'labels' columns
+    for split in dataset:
+        if 'text' not in dataset[split].column_names:
+            raise ValueError(
+                f'`dataset[{split}]` must have a `text` column. If it has a different name '
+                f'in your dataset please specify it using the `text_column` param. '
+                f'For example: distill_model(..., text_column="sentences")'
+            )
+        if 'labels' not in dataset[split].column_names:
+            raise ValueError(
+                f'`dataset[{split}]` must have a `labels` column. If it has a different name '
+                f'in your dataset please specify it using the `label_column` param. '
+                f'For example: distill_model(..., label_column="intents")'
+            )
+
     # distill the model
-    distillation_pipeline = TextClassificationDistillationPipeline(
+    TextClassificationDistillationPipeline.run(
         teacher_model=teacher_model,
         student_ckpt=student_ckpt,
         dataset=dataset,
-    )
-    distillation_pipeline.run(
         save_model_to=save_model_to,
         eval_metric=evaluation_metric,
         optimize_hparams=optimize_hparams,

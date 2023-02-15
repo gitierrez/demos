@@ -19,4 +19,4 @@ def quantize_model(
 
     quantizer.quantize(save_dir=save_model_to, quantization_config=dqconfig)
     logging.info(f'Quantized model saved to {save_model_to}')
-    return model_class.from_pretrained(save_model_to, from_transformers=True)
+    return model_class.from_pretrained(save_model_to)
