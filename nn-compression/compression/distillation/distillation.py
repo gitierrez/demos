@@ -8,60 +8,54 @@ from .kullback_leibler import KnowledgeDistillationTrainingArguments, KnowledgeD
 
 
 class TextClassificationDistillationPipeline:
-    def __init__(
-        self,
+    @classmethod
+    def run(
+        cls,
         teacher_model: transformers.PreTrainedModel,
         student_ckpt: str,
         dataset: datasets.DatasetDict,
-    ):
-        if not all([split in dataset for split in ['train', 'validation', 'test']]):
-            raise ValueError('Dataset must have `train`, `validation`, and `test` splits.')
-
-        self.teacher_model = teacher_model
-        self.student_ckpt = student_ckpt
-        self.tokenizer = transformers.AutoTokenizer.from_pretrained(student_ckpt)
-        self.dataset = dataset
-        self.num_labels = self.dataset['test'].features['labels'].num_classes
-        self.id2label = self.teacher_model.config.id2label
-        self.label2id = self.teacher_model.config.label2id
-
-        tokenization_fn = self._tokenization_function(tokenizer=self.tokenizer)
-        self.dataset = self.dataset.map(tokenization_fn, batched=True, remove_columns=['text'])
-
-    def run(
-        self,
         save_model_to: str,
         eval_metric: str = 'accuracy',
         optimize_hparams: bool = False,
         n_trials: int = None,
         **training_kwargs
     ):
+        # detect if we have a GPU available
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         logging.info(f'Using device: {device}')
-        training_args = self.default_training_args
-        training_args.output_dir = save_model_to
+
+        # instantiate tokenizer
+        tokenizer = transformers.AutoTokenizer.from_pretrained(student_ckpt)
+        tokenization_fn = cls._tokenization_function(tokenizer=tokenizer)
+
+        # tokenize dataset
+        dataset = dataset.map(tokenization_fn, batched=True, remove_columns=['text'])
+
+        # move teacher model to device
+        teacher_model = teacher_model.to(device)
+
+        # setup student model config with num_labels and id-to-label mappings
+        student_config = transformers.AutoConfig.from_pretrained(student_ckpt)
+        student_config.update({
+            'num_labels': dataset['test'].features['labels'].num_classes,
+            'id2label': teacher_model.config.id2label,
+            'label2id': teacher_model.config.label2id,
+        })
+
+        # instantiate training args and override with any kwargs
+        training_args = cls.get_default_training_args(output_dir=save_model_to)
         for k, v in training_kwargs.items():
             setattr(training_args, k, v)
 
-        student_model = transformers.AutoModelForSequenceClassification.from_pretrained(
-            self.student_ckpt
-        )
-
-        student_config = student_model.config
-        student_config.update({
-            'num_labels': self.num_labels,
-            'id2label': self.id2label,
-            'label2id': self.label2id,
-        })
-
+        # instantiate trainer
         trainer = KnowledgeDistillationTrainer(
-            model_init=self._student_init(ckpt=self.student_ckpt, config=student_config, device=device),
-            teacher=self.teacher_model,
+            model_init=cls._student_init(ckpt=student_ckpt, config=student_config, device=device),
+            teacher=teacher_model,
             args=training_args,
-            train_dataset=self.dataset['train'],
-            eval_dataset=self.dataset['validation'],
-            compute_metrics=self._compute_metrics_fn(metric=eval_metric),
-            tokenizer=self.tokenizer,
+            train_dataset=dataset['train'],
+            eval_dataset=dataset['validation'],
+            compute_metrics=cls._compute_metrics_fn(metric=eval_metric),
+            tokenizer=tokenizer,
         )
 
         if optimize_hparams:
@@ -71,18 +65,18 @@ class TextClassificationDistillationPipeline:
             if n_trials is None:
                 raise ValueError('Must specify `n_trials` when `optimize_hparams` is True.')
 
-            optim_hparams = self._get_optimal_hparams(trainer, n_trials=n_trials)
+            optim_hparams = cls._get_optimal_hparams(trainer, n_trials=n_trials)
             for k, v in optim_hparams.items():
                 setattr(training_args, k, v)
 
             trainer = KnowledgeDistillationTrainer(
-                model_init=self._student_init(ckpt=self.student_ckpt, config=student_config, device=device),
-                teacher=self.teacher_model,
+                model_init=cls._student_init(ckpt=student_ckpt, config=student_config, device=device),
+                teacher=teacher_model,
                 args=training_args,
-                train_dataset=self.dataset['train'],
-                eval_dataset=self.dataset['validation'],
-                compute_metrics=self._compute_metrics_fn(metric=eval_metric),
-                tokenizer=self.tokenizer,
+                train_dataset=dataset['train'],
+                eval_dataset=dataset['validation'],
+                compute_metrics=cls._compute_metrics_fn(metric=eval_metric),
+                tokenizer=tokenizer,
             )
 
         trainer.train()
@@ -95,9 +89,10 @@ class TextClassificationDistillationPipeline:
             return tokenizer(batch['text'], truncation=True)
         return tokenize
 
-    @property
-    def default_training_args(self):
+    @staticmethod
+    def get_default_training_args(output_dir: str):
         return KnowledgeDistillationTrainingArguments(
+            output_dir=output_dir,
             evaluation_strategy='epoch',
             per_device_train_batch_size=32,
             per_device_eval_batch_size=32,

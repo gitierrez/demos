@@ -1,6 +1,5 @@
 import datasets
-import optimum
-import transformers
+
 from optimum.pipelines import pipeline as onnx_pipeline
 from transformers import pipeline as transformers_pipeline
 
@@ -9,7 +8,7 @@ from .onnx_benchmark import ONNXPerformanceBenchmark
 
 
 def calculate_statistics(
-    models: dict[str, [transformers.PreTrainedModel | optimum.onnxruntime.ORTModel]],
+    models: dict[str, str],
     dataset: datasets.Dataset,
     metrics: list[str] = None,
     text_column: str = 'text',
@@ -17,15 +16,22 @@ def calculate_statistics(
 ):
     results = {}
     for name, model in models.items():
-        if isinstance(model, optimum.onnxruntime.ORTModel):
-            pipe = onnx_pipeline('text-classification', model=model, accelerator='ort')
-            benchmark = ONNXPerformanceBenchmark
-        else:
+        try:
             pipe = transformers_pipeline('text-classification', model=model)
             benchmark = PerformanceBenchmark
+        except ValueError:
+            pipe = onnx_pipeline('text-classification', model=model, accelerator='ort')
+            benchmark = ONNXPerformanceBenchmark
+
         results[name] = {
             'latency': benchmark.compute_latency(pipe),
-            'metrics': benchmark.compute_metrics(pipe, dataset, metrics, text_column, label_column),
+            'metrics': benchmark.compute_metrics(
+                pipeline=pipe,
+                dataset=dataset,
+                metrics=metrics,
+                text_column=text_column,
+                label_column=label_column
+            ),
             'size': benchmark.compute_size(pipe),
         }
     return results

@@ -1,7 +1,7 @@
 import torch
 import datasets
 import numpy as np
-import warnings
+import logging
 
 from pathlib import Path
 from time import perf_counter
@@ -16,12 +16,12 @@ class PerformanceBenchmark:
         dataset,
         metrics: list[str],
         text_column: str = 'text',
-        label_column: str = 'labels'
+        label_column: str = 'labels',
     ):
         preds, labels = [], []
         class_labels = dataset.features[label_column]
         for i, sample in enumerate(dataset):
-            predicted_label = pipeline(sample[text_column])[0][label_column]
+            predicted_label = pipeline(sample[text_column])[0]['label']
             predicted_id = class_labels.str2int(predicted_label)
             label_id = sample[label_column]
             preds.append(predicted_id)
@@ -30,26 +30,21 @@ class PerformanceBenchmark:
         out_metrics = {}
         for metric in metrics:
             metric = datasets.load_metric(metric)
-            out_metrics[metric.name] = metric.compute(predictions=preds, references=labels)
+            out_metrics.update(metric.compute(predictions=preds, references=labels))
         return out_metrics
 
     @classmethod
     def compute_size(cls, pipeline) -> float:
-        tmp_path = Path('model')
-        size = cls._compute_size(pipeline.model, tmp_path)
+        tmp_path = Path('model-tmp.pt')
+        torch.save(pipeline.model.state_dict(), tmp_path)
+        size = tmp_path.stat().st_size / (1024 * 1024)
         try:
             tmp_path.unlink()
         except PermissionError:  # common issue if running in Windows
-            warnings.warn(
+            logging.warning(
                 f'Captured PermissionError when attempting to remove {tmp_path}'
             )
         return size
-
-    @staticmethod
-    def _compute_size(model, tmp_path):
-        model_path = tmp_path.joinpath('model.pt')
-        torch.save(model.state_dict(), model_path)
-        return tmp_path.stat().st_size / (1024 * 1024)
 
     @classmethod
     def compute_latency(cls, pipeline, query: str = 'auto', num_runs: int = 100, unit: str = 'ms'):
